@@ -2,7 +2,6 @@ services:
   telegram-bot:
     build: .
     container_name: telgram-sentinel-bot
-    restart: always
     environment:
       BOT_TOKEN: ${BOT_TOKEN}
       ADMIN_ID: ${ADMIN_ID}
