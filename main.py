@@ -26,7 +26,8 @@ from telegram.error import Forbidden, BadRequest
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 GROUP_ID = int(os.getenv("GROUP_ID"))
-CHECK_HOUR = int(os.getenv("CHECK_HOUR", "20"))      # 20:00
+CHECK_HOUR = int(os.getenv("CHECK_HOUR", "21"))      # 21:00
+CHECK_MINUTE = int(os.getenv("CHECK_MINUTE", "0"))
 
 STATE_FILE = "state.json"
 
@@ -186,7 +187,7 @@ def main():
     # daily message every day
     app.job_queue.run_daily(
         send_daily_check,
-        time=time(hour=CHECK_HOUR, minute=0)
+        time=time(hour=CHECK_HOUR, minute=CHECK_MINUTE)
     )
 
     # check every hour
