@@ -11,7 +11,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, time
 
-from telegram import Update
+from telegram import Update, ChatPermissions
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -19,6 +19,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.error import Forbidden, BadRequest
+
 
 # =========================
 # CONFIG FROM ENV VARIABLES
@@ -69,9 +70,7 @@ async def lock_group(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.set_chat_permissions(
             chat_id=GROUP_ID,
-            permissions={
-                "can_send_messages": False
-            }
+            permissions=ChatPermissions(can_send_messages=False)
         )
         state["locked"] = True
         save_state(state)
@@ -91,9 +90,7 @@ async def unlock_group(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.set_chat_permissions(
             chat_id=GROUP_ID,
-            permissions={
-                "can_send_messages": True
-            }
+            permissions=ChatPermissions(can_send_messages=True)
         )
         state["locked"] = False
         save_state(state)
@@ -127,6 +124,10 @@ async def verify_seen(context: ContextTypes.DEFAULT_TYPE):
 
     if not state["sent_at"]:
         return
+    
+    # Prevent spamming if it's already locked
+    if state.get("locked"):
+        return
 
     sent_time = datetime.fromisoformat(state["sent_at"])
     now = datetime.utcnow()
@@ -140,7 +141,6 @@ async def verify_seen(context: ContextTypes.DEFAULT_TYPE):
     # Telegram bots cannot truly detect "seen/read receipts" in private chats.
     # So we use admin activity with /seen command or any command.
     await lock_group(context)
-
 
 # =========================
 # COMMANDS
