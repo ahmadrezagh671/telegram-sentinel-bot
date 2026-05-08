@@ -1,5 +1,12 @@
 # 🤖 Telegram Sentinel Bot
 
+<p align="start">
+  <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python" alt="Python">
+  <img src="https://img.shields.io/badge/python--telegram--bot-20.7-green?logo=telegram" alt="python-telegram-bot">
+  <img src="https://img.shields.io/badge/Docker-Ready-blue?logo=docker" alt="Docker">
+  <img src="https://img.shields.io/github/license/ahmadrezagh671/telegram-sentinel-bot" alt="License">
+</p>
+
 Telegram Sentinel Bot is a Python-based Telegram bot that monitors admin activity and automatically locks a group if a daily check-in message is not acknowledged within 24 hours. The admin can unlock the group at any time using a simple command.
 
 ## 🌟 Features
