@@ -115,6 +115,28 @@ async def send_daily_check(context: ContextTypes.DEFAULT_TYPE):
     state["checked"] = False
     save_state(state)
 
+# =========================
+# DAILY PROCESS
+# =========================
+async def daily_job(context: ContextTypes.DEFAULT_TYPE):
+    global state
+    
+    # 1. Check if the PREVIOUS day was cleared
+    # If there is a record of a message but it wasn't checked...
+    if state["sent_at"] and not state["checked"]:
+        logging.info("Deadline missed. Locking group...")
+        await lock_group(context)
+    
+    # 2. Reset state for the NEW day
+    msg = await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text="✅ **New Daily Check.**\nPlease send /seen within 24 hours."
+    )
+
+    state["last_message_id"] = msg.message_id
+    state["sent_at"] = datetime.utcnow().isoformat()
+    state["checked"] = False
+    save_state(state)
 
 # =========================
 # VERIFY AFTER 24 HOURS
@@ -178,23 +200,17 @@ async def reopen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # =========================
 def main():
+    # Ensure you have the job_queue dependency: pip install "python-telegram-bot[job-queue]"
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("seen", seen))
     app.add_handler(CommandHandler("reopen", reopen))
 
-    # daily message every day
+    # Single job handles both the verification and the new message
     app.job_queue.run_daily(
-        send_daily_check,
+        daily_job,
         time=time(hour=CHECK_HOUR, minute=CHECK_MINUTE)
-    )
-
-    # check every hour
-    app.job_queue.run_repeating(
-        verify_seen,
-        interval=3600,
-        first=60
     )
 
     print("Bot started...")
