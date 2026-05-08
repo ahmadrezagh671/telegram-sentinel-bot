@@ -12,7 +12,6 @@ import logging
 from datetime import datetime, timedelta, time
 
 from telegram import Update, ChatPermissions
-from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -36,133 +35,121 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
+
+# Global lock for state file operations (prevents race conditions)
+_state_lock = asyncio.Lock()
 
 # =========================
-# STATE STORAGE
+# STATE STORAGE (with lock and error handling)
 # =========================
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {
+async def load_state():
+    """Load state from JSON file with error handling."""
+    async with _state_lock:
+        default_state = {
             "last_message_id": None,
             "sent_at": None,
             "locked": False,
             "checked": False
         }
+        if not os.path.exists(STATE_FILE):
+            return default_state
 
-    with open(STATE_FILE, "r") as f:
-        return json.load(f)
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                # Ensure all keys exist (in case of old/corrupt state)
+                for key in default_state:
+                    if key not in data:
+                        data[key] = default_state[key]
+                return data
+        except (json.JSONDecodeError, IOError) as e:
+            logger.error(f"Failed to load state file: {e}. Using default state.")
+            return default_state
 
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-
-state = load_state()
+async def save_state(state):
+    """Save state to JSON file atomically."""
+    async with _state_lock:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
 
 
 # =========================
 # HELPERS
 # =========================
 async def lock_group(context: ContextTypes.DEFAULT_TYPE):
-    global state
-
+    """Lock group (set read-only). Only updates state if API call succeeds."""
     try:
         await context.bot.set_chat_permissions(
             chat_id=GROUP_ID,
             permissions=ChatPermissions(can_send_messages=False)
         )
+        # Only update state after successful API call
+        state = await load_state()
         state["locked"] = True
-        save_state(state)
+        await save_state(state)
 
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text="⚠️ Group locked because daily check was not seen in 24h."
         )
+        logger.info("Group locked due to missed check.")
 
     except Exception as e:
-        print("Lock error:", e)
+        logger.error(f"Failed to lock group: {e}")
 
 
 async def unlock_group(context: ContextTypes.DEFAULT_TYPE):
-    global state
-
+    """Unlock group (allow sending messages). Only updates state if API call succeeds."""
     try:
         await context.bot.set_chat_permissions(
             chat_id=GROUP_ID,
             permissions=ChatPermissions(can_send_messages=True)
         )
+        # Only update state after successful API call
+        state = await load_state()
         state["locked"] = False
-        save_state(state)
+        await save_state(state)
+        logger.info("Group unlocked.")
 
     except Exception as e:
-        print("Unlock error:", e)
+        logger.error(f"Failed to unlock group: {e}")
 
 
 # =========================
-# DAILY MESSAGE
-# =========================
-async def send_daily_check(context: ContextTypes.DEFAULT_TYPE):
-    global state
-
-    msg = await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text="✅ Daily check.\nPlease read this message within 24 hours."
-    )
-
-    state["last_message_id"] = msg.message_id
-    state["sent_at"] = datetime.utcnow().isoformat()
-    state["checked"] = False
-    save_state(state)
-
-# =========================
-# DAILY PROCESS
+# DAILY JOB
 # =========================
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
-    global state
-    
-    # 1. Check if the PREVIOUS day was cleared
-    # If there is a record of a message but it wasn't checked...
+    """Run every day at CHECK_HOUR:CHECK_MINUTE.
+    - Locks group if previous day's message was not confirmed.
+    - Sends a new check-in message.
+    """
+    state = await load_state()
+
+    # 1. Check if the previous day's message was not confirmed
     if state["sent_at"] and not state["checked"]:
-        logging.info("Deadline missed. Locking group...")
+        logger.info("Previous daily check not confirmed. Locking group...")
         await lock_group(context)
-    
-    # 2. Reset state for the NEW day
-    msg = await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text="✅ **New Daily Check.**\nPlease send /seen within 24 hours."
-    )
+        # Reload state because lock_group may have updated it
+        state = await load_state()
 
-    state["last_message_id"] = msg.message_id
-    state["sent_at"] = datetime.utcnow().isoformat()
-    state["checked"] = False
-    save_state(state)
+    # 2. Send new daily check message
+    try:
+        msg = await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text="✅ **New Daily Check.**\nPlease send /seen within 24 hours.",
+            parse_mode="Markdown"
+        )
+        # 3. Update state for the new check
+        state["last_message_id"] = msg.message_id
+        state["sent_at"] = datetime.utcnow().isoformat()
+        state["checked"] = False
+        await save_state(state)
+        logger.info("New daily check message sent.")
+    except Exception as e:
+        logger.error(f"Failed to send daily check message: {e}")
 
-# =========================
-# VERIFY AFTER 24 HOURS
-# =========================
-async def verify_seen(context: ContextTypes.DEFAULT_TYPE):
-    global state
-
-    if not state["sent_at"]:
-        return
-    
-    # Prevent spamming if it's already locked
-    if state.get("locked"):
-        return
-
-    sent_time = datetime.fromisoformat(state["sent_at"])
-    now = datetime.utcnow()
-
-    if now < sent_time + timedelta(hours=24):
-        return
-
-    if state["checked"]:
-        return
-
-    # Telegram bots cannot truly detect "seen/read receipts" in private chats.
-    # So we use admin activity with /seen command or any command.
-    await lock_group(context)
 
 # =========================
 # COMMANDS
@@ -170,50 +157,89 @@ async def verify_seen(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
     await update.message.reply_text("Bot running.")
 
 
 async def seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global state
-
+    """Admin command to confirm they've seen the daily check."""
     if update.effective_user.id != ADMIN_ID:
         return
 
+    state = await load_state()
     state["checked"] = True
-    save_state(state)
+    state["sent_at"] = None          # Clear old timestamp
+    state["last_message_id"] = None  # Clear old message ID
+    await save_state(state)
 
     await update.message.reply_text("✅ Daily check confirmed.")
+    logger.info("Admin confirmed daily check.")
 
 
 async def reopen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global state
-
+    """Admin command to manually unlock the group and reset the check state."""
     if update.effective_user.id != ADMIN_ID:
         return
 
+    # Unlock group (this updates state["locked"] = False on success)
     await unlock_group(context)
-    await update.message.reply_text("✅ Group reopened.")
+
+    # Additionally reset the check state so that the next daily_job doesn't lock again
+    state = await load_state()
+    state["checked"] = True        # Mark as confirmed
+    state["sent_at"] = None        # Clear pending check
+    state["last_message_id"] = None
+    await save_state(state)
+
+    await update.message.reply_text("✅ Group reopened and check state reset.")
+
+
+# =========================
+# PERMISSION CHECK ON STARTUP
+# =========================
+async def check_permissions(app: Application):
+    """Verify the bot has admin rights in the group and can message the admin."""
+    try:
+        # Check group permissions
+        chat_member = await app.bot.get_chat_member(GROUP_ID, app.bot.id)
+        if chat_member.status not in ["administrator", "creator"]:
+            logger.error(f"Bot is not an admin in group {GROUP_ID}. Cannot lock/unlock.")
+        else:
+            logger.info("Bot has admin rights in group.")
+
+        # Test ability to message admin (try sending a startup notification)
+        await app.bot.send_message(
+            ADMIN_ID,
+            "Bot started. Daily check-in active."
+        )
+        logger.info("Startup notification sent to admin.")
+    except Forbidden:
+        logger.error(f"Bot cannot send message to admin {ADMIN_ID}. Please start a chat with the bot first.")
+    except Exception as e:
+        logger.error(f"Permission check failed: {e}")
 
 
 # =========================
 # MAIN
 # =========================
 def main():
-    # Ensure you have the job_queue dependency: pip install "python-telegram-bot[job-queue]"
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("seen", seen))
     app.add_handler(CommandHandler("reopen", reopen))
 
-    # Single job handles both the verification and the new message
+    # Schedule daily job
     app.job_queue.run_daily(
         daily_job,
         time=time(hour=CHECK_HOUR, minute=CHECK_MINUTE)
     )
 
-    print("Bot started...")
+    # Run permission checks before starting polling
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(check_permissions(app))
+
+    logger.info("Bot started...")
     app.run_polling()
 
 
