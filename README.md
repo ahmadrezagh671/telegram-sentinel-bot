@@ -21,7 +21,7 @@ Telegram Sentinel Bot is a Python-based Telegram bot that monitors admin activit
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.11+
 - A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
 - A Telegram Group where the bot will act as an administrator
 - Your Telegram User ID (can be obtained from [@userinfobot](https://t.me/userinfobot))
